@@ -165,6 +165,12 @@ class Store:
 
     def enqueue(self, queue: str, priority: int, payload: dict, max_attempts: int) -> dict:
         payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        try:
+            payload_json.encode("utf-8")
+        except UnicodeEncodeError:
+            # Lone surrogates are valid JSON escapes but cannot be bound as
+            # UTF-8 text; store their ASCII-escaped representation instead.
+            payload_json = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
         with self._lock:
             timestamp = format_ms(now_ms())
             for _ in range(5):

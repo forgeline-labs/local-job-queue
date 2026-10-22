@@ -9,13 +9,21 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
+from .clock import MAX_TIMESTAMP_MS, format_ms, now_ms
 from .store import JobConflict, JobNotFound, Store
 
 MAX_PAYLOAD_BYTES = 262144
+# A valid enqueue body can carry the payload plus the surrounding envelope
+# (and, for non-ASCII input, JSON escapes).  Refuse anything substantially
+# larger before reading it into memory.
+MAX_REQUEST_BODY_BYTES = MAX_PAYLOAD_BYTES * 4
 MAX_QUEUE_LENGTH = 128
 MAX_ERROR_LENGTH = 1024
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
+# SQLite INTEGER values are signed 64-bit; binding a larger Python int raises
+# OverflowError, so API inputs that reach SQL must fit in this range.
+MAX_SQLITE_INTEGER = 2**63 - 1
 
 _ROUTES = (
     (re.compile(r"^/health$"), {"GET": "health"}),
@@ -30,8 +38,6 @@ _ROUTES = (
 
 def log_event(event: str, **fields: object) -> None:
     """Write a structured JSON log line to stdout."""
-    from .clock import format_ms, now_ms
-
     record = {"time": format_ms(now_ms()), "event": event, **fields}
     try:
         sys.stdout.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -75,7 +81,7 @@ def clamp_offset(raw: str | None) -> int:
         value = int(raw)
     except (TypeError, ValueError):
         return 0
-    return max(0, value)
+    return min(max(0, value), MAX_SQLITE_INTEGER)
 
 
 def _is_int(value: object) -> bool:
@@ -166,9 +172,21 @@ class _RequestHandler(BaseHTTPRequestHandler):
         try:
             length = int(header)
         except (TypeError, ValueError):
+            self.close_connection = True
             raise _invalid_json("invalid Content-Length header") from None
         if length < 0:
+            self.close_connection = True
             raise _invalid_json("invalid Content-Length header")
+        if length > MAX_REQUEST_BODY_BYTES:
+            # Do not read an oversized body: reading it before validating the
+            # payload would let a single request exhaust process memory.  The
+            # connection is closed because the body is left unread.
+            self.close_connection = True
+            raise ApiError(
+                413,
+                "payload_too_large",
+                f"request body must not exceed {MAX_REQUEST_BODY_BYTES} bytes",
+            )
         return self.rfile.read(length) if length else b""
 
     def _has_json_content_type(self) -> bool:
@@ -214,10 +232,17 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     # -- responses -----------------------------------------------------
     def _send_json(self, status: int, payload: object) -> None:
-        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        try:
+            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        except UnicodeEncodeError:
+            # Lone surrogates (legal JSON escapes) cannot be encoded directly;
+            # escaping them keeps the response valid UTF-8.
+            body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -259,15 +284,23 @@ class _RequestHandler(BaseHTTPRequestHandler):
             )
 
         max_attempts = body.get("max_attempts", self.default_max_attempts)
-        if not _is_int(max_attempts) or max_attempts < 1:
+        if not _is_int(max_attempts) or not 1 <= max_attempts <= MAX_SQLITE_INTEGER:
             raise ApiError(
                 422,
                 "invalid_max_attempts",
-                "max_attempts must be an integer >= 1",
+                "max_attempts must be an integer between 1 and 9223372036854775807",
             )
 
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        if len(serialized.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+        try:
+            payload_size = len(serialized.encode("utf-8"))
+        except UnicodeEncodeError:
+            # A lone surrogate cannot be represented in UTF-8; measure its
+            # ASCII-escaped form instead so it can still be judged and stored.
+            payload_size = len(
+                json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+            )
+        if payload_size > MAX_PAYLOAD_BYTES:
             raise ApiError(
                 413,
                 "payload_too_large",
@@ -301,11 +334,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
             )
 
         lease_duration_ms = body.get("lease_duration_ms")
-        if not _is_int(lease_duration_ms) or lease_duration_ms <= 0:
+        if (
+            not _is_int(lease_duration_ms)
+            or lease_duration_ms <= 0
+            or now_ms() + lease_duration_ms > MAX_TIMESTAMP_MS
+        ):
             raise ApiError(
                 422,
                 "lease_duration_required",
-                "lease_duration_ms must be a positive integer",
+                "lease_duration_ms must be a positive integer within the supported range",
             )
 
         job = self.store.claim(queue, lease_duration_ms)

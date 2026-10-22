@@ -622,6 +622,64 @@ class AdditionalSpecTest(unittest.TestCase):
         job = service.enqueue(max_attempts=9)
         self.assertEqual(job["max_attempts"], 9)
 
+    # -- review regressions (round 1) ---------------------------------
+    def test_oversized_content_length_is_rejected_before_reading(self) -> None:
+        service = self.start()
+        with socket.create_connection(("127.0.0.1", service.port), timeout=5) as sock:
+            sock.sendall(
+                b"POST /jobs HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 500000000\r\n\r\n"
+            )
+            response = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+        head, _, body = response.partition(b"\r\n\r\n")
+        self.assertIn(b" 413 ", head.splitlines()[0])
+        self.assertEqual(json.loads(body)["error"]["code"], "payload_too_large")
+
+    def test_lone_surrogate_payload_round_trips(self) -> None:
+        service = self.start()
+        raw = b'{"queue":"q","payload":{"x":"\\ud800"}}'
+        status, job, _ = service.request("POST", "/jobs", raw=raw)
+        self.assertEqual(status, 202)
+        self.assertEqual(job["payload"], {"x": "\ud800"})
+
+        status, fetched, _ = service.request("GET", f"/jobs/{job['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(fetched["payload"], {"x": "\ud800"})
+
+    def test_huge_max_attempts_is_rejected(self) -> None:
+        service = self.start()
+        body = {"queue": "q", "payload": {}, "max_attempts": 100000000000000000000}
+        status, response, _ = service.request("POST", "/jobs", body=body)
+        self.assertEqual((status, response["error"]["code"]), (422, "invalid_max_attempts"))
+
+    def test_huge_offset_is_clamped(self) -> None:
+        service = self.start()
+        service.enqueue()
+        status, body, _ = service.request("GET", "/jobs?offset=99999999999999999999999")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["total"], 1)
+        self.assertEqual(body["jobs"], [])
+
+        status, body, _ = service.request("GET", "/jobs/dead-letter?offset=99999999999999999999999")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["jobs"], [])
+
+    def test_huge_lease_duration_is_rejected(self) -> None:
+        service = self.start()
+        status, body, _ = service.request(
+            "POST",
+            "/jobs/claim",
+            body={"queue": "q", "lease_duration_ms": 100000000000000000},
+        )
+        self.assertEqual((status, body["error"]["code"]), (422, "lease_duration_required"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

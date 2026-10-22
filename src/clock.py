@@ -13,6 +13,9 @@ from datetime import datetime, timezone
 
 _TIME_ENV = "JOB_CURRENT_TIME_MS"
 
+# Largest representable millisecond timestamp: 9999-12-31T23:59:59.999Z.
+MAX_TIMESTAMP_MS = 253402300799999
+
 
 def now_ms() -> int:
     """Return the current time in Unix milliseconds.
