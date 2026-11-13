@@ -369,3 +369,9 @@ implementation.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Windows
+
+Use Python 3 from PATH. PowerShell and cmd can run `serve.cmd`;
+`python serve` invokes the same entry point. UTF-8 output and LF line endings
+are consistent across platforms. CI runs the visible suite on Ubuntu and Windows.

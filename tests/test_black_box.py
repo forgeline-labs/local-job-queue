@@ -13,6 +13,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -60,7 +61,7 @@ class Service:
     def start(self) -> None:
         self.port = free_port()
         self.proc = subprocess.Popen(
-            [SERVE, "--port", str(self.port), "--data-dir", self.data_dir],
+            [sys.executable, SERVE, "--port", str(self.port), "--data-dir", self.data_dir],
             cwd=ROOT,
             env=self._env(),
             stdout=subprocess.DEVNULL,
@@ -90,7 +91,10 @@ class Service:
         if self.proc is None:
             return
         if self.proc.poll() is None:
-            self.proc.send_signal(sig)
+            if sig == getattr(signal, "SIGKILL", None):
+                self.proc.kill()
+            else:
+                self.proc.terminate()
             try:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:  # pragma: no cover - defensive
@@ -367,7 +371,7 @@ class BlackBoxTest(unittest.TestCase):
         job = service.enqueue(max_attempts=3)
         service.claim()
         service.fail(job["id"])
-        service.stop(sig=signal.SIGKILL)
+        service.stop(sig=getattr(signal, "SIGKILL", signal.SIGTERM))
 
         service.start()
         reclaimed = service.wait_for_retry(timeout=3.0)
@@ -469,7 +473,7 @@ class BlackBoxTest(unittest.TestCase):
             env["DATA_DIR"] = tempfile.mkdtemp(prefix="ljq-busy-")
             try:
                 result = subprocess.run(
-                    [SERVE, "--port", str(busy_port)],
+                    [sys.executable, SERVE, "--port", str(busy_port)],
                     cwd=ROOT,
                     env=env,
                     capture_output=True,
@@ -486,7 +490,7 @@ class BlackBoxTest(unittest.TestCase):
         bad_env["DATA_DIR"] = tempfile.mkdtemp(prefix="ljq-badenv-")
         try:
             result = subprocess.run(
-                [SERVE, "--port", str(free_port())],
+                [sys.executable, SERVE, "--port", str(free_port())],
                 cwd=ROOT,
                 env=bad_env,
                 capture_output=True,

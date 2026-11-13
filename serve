@@ -4,6 +4,10 @@
 import os
 import sys
 
+for stream in (sys.stdin, sys.stdout, sys.stderr):
+    if stream is not None and hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", newline="\n")
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.main import main  # noqa: E402 -- the package path is set up above

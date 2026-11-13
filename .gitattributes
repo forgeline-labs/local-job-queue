@@ -1,0 +1,11 @@
+* text=auto
+app text eol=lf
+serve text eol=lf
+setup text eol=lf
+*.sh text eol=lf
+*.cmd text eol=crlf
+*.py text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+*.env text eol=lf
+*.bin binary
