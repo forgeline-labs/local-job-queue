@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -373,7 +374,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # On Windows SO_REUSEADDR lets a second process bind a busy port, which
+    # would hide the "port in use" startup failure (AC-17). Use exclusive
+    # binding there; keep SO_REUSEADDR on POSIX for fast restarts.
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self) -> None:
+        exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if sys.platform == "win32" and exclusive is not None:
+            self.socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+        super().server_bind()
 
 
 def make_server(host: str, port: int, store: Store, default_max_attempts: int) -> Server:
